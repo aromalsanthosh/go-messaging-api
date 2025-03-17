@@ -89,9 +89,9 @@ func (q *RedisQueue) EnqueueMessage(ctx context.Context, message *models.Message
 		return fmt.Errorf("failed to add message to stream: %w", err)
 	}
 	
-	// Store the Redis Stream message ID in the message object for reference
+	// Store the Redis Stream message ID in the RedisStreamID field for reference
 	// This is the ID that should be used for acknowledgment
-	message.ID = msgID
+	message.RedisStreamID = msgID
 
 	return nil
 }

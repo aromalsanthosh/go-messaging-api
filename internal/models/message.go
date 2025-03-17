@@ -2,6 +2,8 @@ package models
 
 import (
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type Message struct {
@@ -16,6 +18,7 @@ type Message struct {
 
 func NewMessage(senderID, receiverID, content string) *Message {
 	return &Message{
+		ID:         uuid.New().String(),
 		SenderID:   senderID,
 		ReceiverID: receiverID,
 		Content:    content,

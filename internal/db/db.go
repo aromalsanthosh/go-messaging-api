@@ -86,8 +86,9 @@ func initSchema(db *sqlx.DB) error {
 
 // SaveMessage inserts a new message into the database
 func (d *Database) SaveMessage(ctx context.Context, message *models.Message) error {
-	messageID := uuid.New().String()
-	message.ID = messageID
+	if message.ID == "" {
+		message.ID = uuid.New().String()
+	}
 
 	_, err := d.db.ExecContext(
 		ctx,
