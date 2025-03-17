@@ -3,7 +3,8 @@
 
 A real-time messaging platform backend API built with Go, featuring asynchronous message processing with Redis queue.
 
-  
+  ![go-zoko](https://github.com/user-attachments/assets/b9a7e892-c08d-43db-b66a-e883bb617df3)
+
 
 ## Features
 
