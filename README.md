@@ -350,4 +350,14 @@ curl  -X  PATCH  http://localhost:8080/api/v1/messages/{message_id}/read
 
 -  `REDIS_URL` - Redis connection string
 
-  
+## Test Files
+
+#### To run test_runner.go that sends random 100 messages
+```bash
+go run -tags=test cmd/api/test_runner.go
+```
+
+#### To run test_runner2.go that sends 30 messages with 1 second delay between each message
+```bash
+go run -tags=test cmd/api/test_runner2.go
+```
