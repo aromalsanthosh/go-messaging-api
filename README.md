@@ -278,23 +278,7 @@ The server will start on port 8080 and the message worker will begin processing 
 
   
 
-### Step 6: Test the API
-
-  
-
-You can run the automated test suite to verify all endpoints are working correctly. The test runner will generate random usernames and send 100 messages between them:
-
-  
-
-```bash
-
-go  run  cmd/api/test_runner.go
-
-```
-
-  
-
-Or test manually using curl:
+test using curl:
 
   
 
