@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aromalsanthosh/go-messaging-api/internal/models"
@@ -72,21 +73,36 @@ func (q *RedisQueue) EnqueueMessage(ctx context.Context, message *models.Message
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
 
-	// Add the message to the Redis Stream
+	// Add the message to the Redis Stream with automatic trimming
+	// This prevents unbounded memory growth in Redis
 	values := map[string]interface{}{
 		"message": string(messageJSON),
 		"original_id": originalID, // Store the original UUID for reference
 	}
 	
-	// Add to stream and get the message ID
-	msgID, err := q.client.XAdd(ctx, &redis.XAddArgs{
+	// Use a pipeline to reduce network round-trips
+	pipe := q.client.Pipeline()
+	
+	// Add to stream with MAXLEN trimming to keep the stream at a reasonable size
+	// The ~ makes it an approximate trimming which is much more efficient
+	xAddCmd := pipe.XAdd(ctx, &redis.XAddArgs{
 		Stream: MessageStreamKey,
 		ID:     "*", // Auto-generate ID
 		Values: values,
-	}).Result()
+		MaxLen: 10000,    // Keep approximately 10,000 messages
+		Approx: true,     // Use approximate trimming for better performance
+	})
 	
+	// Execute pipeline
+	_, err = pipe.Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to add message to stream: %w", err)
+	}
+	
+	// Get the message ID from the XAdd command
+	msgID, err := xAddCmd.Result()
+	if err != nil {
+		return fmt.Errorf("failed to get message ID: %w", err)
 	}
 	
 	// Store the Redis Stream message ID in the RedisStreamID field for reference
@@ -98,17 +114,38 @@ func (q *RedisQueue) EnqueueMessage(ctx context.Context, message *models.Message
 
 // DequeueMessage consumes a message from the Redis Stream
 func (q *RedisQueue) DequeueMessage(ctx context.Context) (*models.Message, error) {
-	// Read from the stream with a consumer group
-	// This allows for message acknowledgment and prevents message loss
-	streams, err := q.client.XReadGroup(ctx, &redis.XReadGroupArgs{
+	// First try to read pending messages (messages that were delivered but not acknowledged)
+	// This helps prevent message loss in case of crashes
+	pendingStreams, pendingErr := q.client.XReadGroup(ctx, &redis.XReadGroupArgs{
 		Group:    ConsumerGroup,
 		Consumer: ConsumerName,
-		Streams:  []string{MessageStreamKey, ">"},  // ">" means only new messages
-		Count:    1,                                // Process one message at a time
-		Block:    0,                                // Block until a message is available
+		Streams:  []string{MessageStreamKey, "0"}, // "0" means read pending messages first
+		Count:    1,                               // Process one message at a time
+		Block:    100 * time.Millisecond,          // Short timeout for pending messages
 	}).Result()
 	
+	// If we found pending messages, use them
+	var streams []redis.XStream
+	var err error
+	
+	if pendingErr == nil && len(pendingStreams) > 0 && len(pendingStreams[0].Messages) > 0 {
+		streams = pendingStreams
+	} else {
+		// Otherwise, read new messages from the stream
+		streams, err = q.client.XReadGroup(ctx, &redis.XReadGroupArgs{
+			Group:    ConsumerGroup,
+			Consumer: ConsumerName,
+			Streams:  []string{MessageStreamKey, ">"}, // ">" means only new messages
+			Count:    1,                               // Process one message at a time
+			Block:    1 * time.Second,                 // Block with timeout for new messages
+		}).Result()
+	}
+
 	if err != nil {
+		// If no messages available, return a specific error
+		if err == redis.Nil {
+			return nil, fmt.Errorf("no messages available")
+		}
 		return nil, fmt.Errorf("failed to read from stream: %w", err)
 	}
 	
@@ -124,6 +161,8 @@ func (q *RedisQueue) DequeueMessage(ctx context.Context) (*models.Message, error
 	// Extract the message JSON from the values
 	messageJSON, ok := xMessage.Values["message"].(string)
 	if !ok {
+		// Acknowledge invalid messages to prevent them from blocking the queue
+		_ = q.client.XAck(ctx, MessageStreamKey, ConsumerGroup, redisStreamID).Err()
 		return nil, fmt.Errorf("invalid message format")
 	}
 	
@@ -164,57 +203,86 @@ func (q *RedisQueue) AcknowledgeMessage(ctx context.Context, messageID string) e
 // CleanupPendingEntries handles the PEL (Pending Entries List) limit issue by claiming and acknowledging
 // any pending messages that might be causing the limit to be reached
 func (q *RedisQueue) CleanupPendingEntries(ctx context.Context) error {
-	// Get all pending messages for the consumer group
-	pendingInfo, err := q.client.XPendingExt(ctx, &redis.XPendingExtArgs{
-		Stream:   MessageStreamKey,
-		Group:    ConsumerGroup,
-		Start:    "-", // Start from the earliest pending message
-		End:      "+", // End at the latest pending message
-		Count:    100,    // Process in batches of 100
-		Consumer: ConsumerName,
-	}).Result()
+	// Use a more efficient approach with a single loop instead of recursion
+	totalCleaned := 0
+	batchSize := 100
+	
+	for {
+		// Get pending messages for the consumer group in batches
+		pendingInfo, err := q.client.XPendingExt(ctx, &redis.XPendingExtArgs{
+			Stream:   MessageStreamKey,
+			Group:    ConsumerGroup,
+			Start:    "-", // Start from the earliest pending message
+			End:      "+", // End at the latest pending message
+			Count:    int64(batchSize),
+			Consumer: ConsumerName,
+		}).Result()
 
-	if err != nil {
-		return fmt.Errorf("failed to get pending messages: %w", err)
+		// Handle errors but don't fail the entire operation for non-critical errors
+		if err != nil {
+			// If the stream doesn't exist yet, that's not an error
+			if err == redis.Nil || strings.Contains(err.Error(), "NOGROUP") {
+				return nil
+			}
+			return fmt.Errorf("failed to get pending messages: %w", err)
+		}
+
+		// If there are no pending messages, we're done
+		if len(pendingInfo) == 0 {
+			break
+		}
+
+		// Collect message IDs to claim and acknowledge
+		messageIDs := make([]string, 0, len(pendingInfo))
+		for _, pending := range pendingInfo {
+			// Only process messages that have been idle for some time (> 5 minutes)
+			if pending.Idle > time.Minute*5 {
+				messageIDs = append(messageIDs, pending.ID)
+			}
+		}
+
+		// If no messages need processing after filtering, we're done with this batch
+		if len(messageIDs) == 0 {
+			if len(pendingInfo) < batchSize {
+				break // No more messages to process
+			}
+			continue // Check next batch
+		}
+
+		// Claim and acknowledge in a single batch to reduce Redis calls
+		_, err = q.client.XClaim(ctx, &redis.XClaimArgs{
+			Stream:   MessageStreamKey,
+			Group:    ConsumerGroup,
+			Consumer: ConsumerName,
+			MinIdle:  time.Minute*5, // Only claim messages idle for at least 5 minutes
+			Messages: messageIDs,
+		}).Result()
+
+		if err != nil && err != redis.Nil {
+			// Log the error but continue processing
+			fmt.Printf("Warning: failed to claim pending messages: %v\n", err)
+			// If we can't claim, don't try to acknowledge
+			continue
+		}
+
+		// Acknowledge the claimed messages
+		if len(messageIDs) > 0 {
+			err = q.client.XAck(ctx, MessageStreamKey, ConsumerGroup, messageIDs...).Err()
+			if err != nil {
+				fmt.Printf("Warning: failed to acknowledge claimed messages: %v\n", err)
+			} else {
+				totalCleaned += len(messageIDs)
+			}
+		}
+
+		// If we processed less than a full batch, we're done
+		if len(pendingInfo) < batchSize {
+			break
+		}
 	}
 
-	// If there are no pending messages, we're done
-	if len(pendingInfo) == 0 {
-		return nil
-	}
-
-	// Collect message IDs to claim and acknowledge
-	messageIDs := make([]string, 0, len(pendingInfo))
-	for _, pending := range pendingInfo {
-		messageIDs = append(messageIDs, pending.ID)
-	}
-
-	// Claim the messages to this consumer
-	// This is necessary before we can acknowledge them
-	_, err = q.client.XClaim(ctx, &redis.XClaimArgs{
-		Stream:   MessageStreamKey,
-		Group:    ConsumerGroup,
-		Consumer: ConsumerName,
-		MinIdle:  time.Minute, // Claim messages that have been idle for at least 1 minute
-		Messages: messageIDs,
-	}).Result()
-
-	if err != nil {
-		return fmt.Errorf("failed to claim pending messages: %w", err)
-	}
-
-	// Acknowledge the claimed messages
-	err = q.client.XAck(ctx, MessageStreamKey, ConsumerGroup, messageIDs...).Err()
-	if err != nil {
-		return fmt.Errorf("failed to acknowledge claimed messages: %w", err)
-	}
-
-	fmt.Printf("Cleaned up %d pending messages from Redis Stream\n", len(messageIDs))
-
-	// If we processed a full batch, there might be more pending messages
-	// Recursively call this function to process the next batch
-	if len(pendingInfo) == 100 {
-		return q.CleanupPendingEntries(ctx)
+	if totalCleaned > 0 {
+		fmt.Printf("Cleaned up %d pending messages from Redis Stream\n", totalCleaned)
 	}
 
 	return nil
