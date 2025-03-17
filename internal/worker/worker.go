@@ -23,10 +23,17 @@ func StartWorker(database *db.Database, messageQueue *queue.RedisQueue) *WorkerC
 		Cancel: cancel,
 	}
 
-	// Start a goroutine to periodically clean up pending entries
+	// Start a goroutine to periodically maintain Redis Stream health
 	go func() {
-		cleanupTicker := time.NewTicker(1 * time.Minute)
+		// cleanup frequency  every 10 minutes
+		cleanupTicker := time.NewTicker(10 * time.Minute)
+		// Add stream trimming every 30 minutes
+		trimTicker := time.NewTicker(30 * time.Minute)
 		defer cleanupTicker.Stop()
+		defer trimTicker.Stop()
+
+		// Define the maximum number of messages to keep in the stream
+		const maxStreamLength int64 = 10000
 
 		for {
 			select {
@@ -36,8 +43,11 @@ func StartWorker(database *db.Database, messageQueue *queue.RedisQueue) *WorkerC
 				// Clean up pending entries that might be causing the PEL limit issue
 				if err := messageQueue.CleanupPendingEntries(ctx); err != nil {
 					log.Printf("Error cleaning up pending entries: %v", err)
-				} else {
-					log.Println("Successfully cleaned up pending entries")
+				}
+			case <-trimTicker.C:
+				// Trim the stream to prevent unbounded growth
+				if err := messageQueue.TrimStream(ctx, maxStreamLength); err != nil {
+					log.Printf("Error trimming Redis Stream: %v", err)
 				}
 			}
 		}
