@@ -238,23 +238,14 @@ Create a `.env` file in the root directory with the following content:
   
 
 ```
-
 # API Server Configuration
-
 PORT=8080
 
-  
-
 # Database Configuration
-
 NEON_DB_URL=postgresql://postgres:postgres@localhost:5432/messaging?sslmode=disable
 
-  
-
 # Redis Configuration
-
 REDIS_URL=redis://localhost:6379
-
 ```
 
   
