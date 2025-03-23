@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"strconv"
+	"fmt"
 
 	"github.com/aromalsanthosh/go-messaging-api/internal/db"
 	"github.com/aromalsanthosh/go-messaging-api/internal/models"
@@ -110,6 +112,24 @@ func parsePaginationParams(c *gin.Context) models.PaginationParams {
 
 
 // MarkAsRead handles the PATCH /messages/:id/read endpoint
+// func (h *MessageHandler) MarkAsRead(c *gin.Context) {
+// 	messageID := c.Param("id")
+// 	if messageID == "" {
+// 		c.JSON(http.StatusBadRequest, gin.H{"error": "Message ID is required"})
+// 		return
+// 	}
+
+// 	// Mark the message as read
+// 	if err := h.database.MarkMessageAsRead(c.Request.Context(), messageID); err != nil {
+// 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to mark message as read: " + err.Error()})
+// 		return
+// 	}
+
+// 	c.JSON(http.StatusOK, models.ReadStatus{Status: "read"})
+// }
+
+
+// MarkAsRead handles the PATCH /messages/:id/read endpoint
 func (h *MessageHandler) MarkAsRead(c *gin.Context) {
 	messageID := c.Param("id")
 	if messageID == "" {
@@ -117,11 +137,15 @@ func (h *MessageHandler) MarkAsRead(c *gin.Context) {
 		return
 	}
 
-	// Mark the message as read
-	if err := h.database.MarkMessageAsRead(c.Request.Context(), messageID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to mark message as read: " + err.Error()})
-		return
-	}
+	readContext := context.Background()
+	go func(messageID string) {
+		err := h.database.MarkMessageAsRead(readContext,messageID);
+		if err != nil{
+			fmt.Print("error while marking mesage as read" , err)
+		}else {
+			fmt.Println("Succesfully marked message as read", messageID)
+		}
+	}(messageID)
 
-	c.JSON(http.StatusOK, models.ReadStatus{Status: "read"})
+	c.JSON(http.StatusOK, models.ReadStatus{Status: "read_pending",Message: "Message marked for read status update"})
 }

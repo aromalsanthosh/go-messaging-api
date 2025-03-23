@@ -35,6 +35,7 @@ type MessageRequest struct {
 
 type ReadStatus struct {
 	Status string `json:"status"`
+	Message string `json:"message"`
 }
 
 type PaginationParams struct {
